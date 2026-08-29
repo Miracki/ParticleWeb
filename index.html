@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="zh-CN">
+
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+        <title>Particles</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+                user-select: none;
+            }
+
+            body {
+                background: radial-gradient(circle at 20% 30%, #0a0f2a, #030617);
+                min-height: 100vh;
+                overflow: hidden;
+                cursor: crosshair;
+            }
+
+            canvas {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                display: block;
+                z-index: 10;
+                pointer-events: auto;
+            }
+
+            /* All UI elements removed — pure particle canvas */
+        </style>
+    </head>
+
+    <body>
+        <canvas id="shapeCanvas"></canvas>
+        <script>
+            (function () {
+                "use strict";
+
+                // ---------- Core config (performance tuned) ----------
+                const CONFIG = {
+                    PARTICLES_PER_CLICK: 42,        // base count (reduced for performance)
+                    LIFE_RANGE: [0.7, 1.6],
+                    GRAVITY: 0.10,
+                    DRAG: 0.987,
+                    SPEED_RANGE: [40, 170],
+                    SIZE_RANGE: [3.5, 12],
+                    SHAPES: ["circle", "square", "star", "triangle", "diamond"],
+                    COLOR_PALETTE: [
+                        "#FF3366", "#FF6B4A", "#FFB347", "#3ECF8E", "#2A9DF4",
+                        "#B980EA", "#FF69B4", "#F4D03F", "#58D68D", "#E67E22",
+                        "#E84393", "#5DADE2", "#F7DC6F", "#A569BD", "#1ABC9C"
+                    ],
+                    GLOW_INTENSITY: 0.65,            // lower glow reduces fill overhead
+                    ROTATION_SPIN: true,
+                    MAX_PARTICLES: 800                // hard cap to prevent jank
+                };
+
+                // DOM refs
+                const canvas = document.getElementById("shapeCanvas");
+                let ctx = canvas.getContext("2d");
+                let width = window.innerWidth;
+                let height = window.innerHeight;
+
+                // particle pool
+                let particles = [];
+                let animationId = null;
+                let previousTime = performance.now() / 1000;
+
+                // ---------- Helpers ----------
+                function randomRange(min, max) {
+                    return min + Math.random() * (max - min);
+                }
+
+                function getRandomColor() {
+                    if (Math.random() < 0.8) {
+                        const palette = CONFIG.COLOR_PALETTE;
+                        return palette[Math.floor(Math.random() * palette.length)];
+                    } else {
+                        return `hsl(${Math.random() * 360}, 80%, 62%)`;
+                    }
+                }
+
+                function getRandomShape() {
+                    const shapes = CONFIG.SHAPES;
+                    return shapes[Math.floor(Math.random() * shapes.length)];
+                }
+
+                // ---------- Shape drawing (lightweight, fewer save/restore) ----------
+                function drawCircle(ctx, x, y, size, rotation, color, alpha) {
+                    ctx.globalAlpha = alpha;
+                    ctx.fillStyle = color;
+                    ctx.shadowBlur = size * 0.6;
+                    ctx.shadowColor = color;
+                    ctx.beginPath();
+                    ctx.arc(x, y, size * 0.5, 0, Math.PI * 2);
+                    ctx.fill();
+                    // small highlight (optional, minor cost)
+                    if (size > 6) {
+                        ctx.globalAlpha = alpha * 0.4;
+                        ctx.fillStyle = "#FFF9E0";
+                        ctx.beginPath();
+                        ctx.arc(x, y, size * 0.18, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+
+                function drawSquare(ctx, x, y, size, rotation, color, alpha) {
+                    ctx.globalAlpha = alpha;
+                    ctx.fillStyle = color;
+                    ctx.shadowBlur = size * 0.6;
+                    ctx.shadowColor = color;
+                    ctx.save();
+                    ctx.translate(x, y);
+                    ctx.rotate(rotation);
+                    const half = size * 0.5;
+                    ctx.fillRect(-half, -half, size, size);
+                    if (size > 7) {
+                        ctx.globalAlpha = alpha * 0.45;
+                        ctx.fillStyle = "#FFFAE6";
+                        ctx.fillRect(-half * 0.4, -half * 0.4, size * 0.4, size * 0.4);
+                    }
+                    ctx.restore();
+                }
+
+                function drawStar(ctx, x, y, size, rotation, color, alpha) {
+                    ctx.globalAlpha = alpha;
+                    ctx.fillStyle = color;
+                    ctx.shadowBlur = size * 0.7;
+                    ctx.shadowColor = color;
+                    ctx.save();
+                    ctx.translate(x, y);
+                    ctx.rotate(rotation);
+                    const outerR = size * 0.5;
+                    const innerR = size * 0.22;
+                    const points = 5;
+                    const angleStep = Math.PI / points;
+                    let startAngle = -Math.PI / 2;
+                    ctx.beginPath();
+                    for (let i = 0; i < 2 * points; i++) {
+                        let r = i % 2 === 0 ? outerR : innerR;
+                        let angle = startAngle + i * angleStep;
+                        let dx = Math.cos(angle) * r;
+                        let dy = Math.sin(angle) * r;
+                        if (i === 0) ctx.moveTo(dx, dy);
+                        else ctx.lineTo(dx, dy);
+                    }
+                    ctx.closePath();
+                    ctx.fill();
+                    if (size > 8) {
+                        ctx.globalAlpha = alpha * 0.5;
+                        ctx.fillStyle = "#FFF3B0";
+                        ctx.beginPath();
+                        ctx.arc(0, 0, size * 0.15, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                    ctx.restore();
+                }
+
+                function drawTriangle(ctx, x, y, size, rotation, color, alpha) {
+                    ctx.globalAlpha = alpha;
+                    ctx.fillStyle = color;
+                    ctx.shadowBlur = size * 0.6;
+                    ctx.shadowColor = color;
+                    ctx.save();
+                    ctx.translate(x, y);
+                    ctx.rotate(rotation);
+                    const side = size;
+                    const heightVal = side * (Math.sqrt(3) / 2);
+                    const halfBase = side / 2;
+                    const topY = -heightVal * 0.55;
+                    const bottomY = heightVal * 0.45;
+                    ctx.beginPath();
+                    ctx.moveTo(0, topY);
+                    ctx.lineTo(-halfBase, bottomY);
+                    ctx.lineTo(halfBase, bottomY);
+                    ctx.closePath();
+                    ctx.fill();
+                    if (size > 8) {
+                        ctx.globalAlpha = alpha * 0.45;
+                        ctx.fillStyle = "#FFF3CF";
+                        ctx.beginPath();
+                        ctx.moveTo(0, topY * 0.5);
+                        ctx.lineTo(-halfBase * 0.45, bottomY * 0.5);
+                        ctx.lineTo(halfBase * 0.45, bottomY * 0.5);
+                        ctx.fill();
+                    }
+                    ctx.restore();
+                }
+
+                function drawDiamond(ctx, x, y, size, rotation, color, alpha) {
+                    ctx.globalAlpha = alpha;
+                    ctx.fillStyle = color;
+                    ctx.shadowBlur = size * 0.6;
+                    ctx.shadowColor = color;
+                    ctx.save();
+                    ctx.translate(x, y);
+                    ctx.rotate(rotation);
+                    const halfW = size * 0.55;
+                    const halfH = size * 0.55;
+                    ctx.beginPath();
+                    ctx.moveTo(0, -halfH);
+                    ctx.lineTo(halfW, 0);
+                    ctx.lineTo(0, halfH);
+                    ctx.lineTo(-halfW, 0);
+                    ctx.closePath();
+                    ctx.fill();
+                    if (size > 8) {
+                        ctx.globalAlpha = alpha * 0.45;
+                        ctx.fillStyle = "#FFF6D0";
+                        ctx.beginPath();
+                        ctx.moveTo(0, -halfH * 0.35);
+                        ctx.lineTo(halfW * 0.35, 0);
+                        ctx.lineTo(0, halfH * 0.35);
+                        ctx.lineTo(-halfW * 0.35, 0);
+                        ctx.fill();
+                    }
+                    ctx.restore();
+                }
+
+                function drawShapeByType(shape, ctx, x, y, size, rotation, color, alpha) {
+                    // fast dispatch, reduce call overhead
+                    switch (shape) {
+                        case "circle": drawCircle(ctx, x, y, size, rotation, color, alpha); break;
+                        case "square": drawSquare(ctx, x, y, size, rotation, color, alpha); break;
+                        case "star": drawStar(ctx, x, y, size, rotation, color, alpha); break;
+                        case "triangle": drawTriangle(ctx, x, y, size, rotation, color, alpha); break;
+                        case "diamond": drawDiamond(ctx, x, y, size, rotation, color, alpha); break;
+                        default: drawCircle(ctx, x, y, size, rotation, color, alpha);
+                    }
+                }
+
+                // ---------- Particle class (lightweight) ----------
+                class ShapeParticle {
+                    constructor(x, y, vx, vy, size, shape, color, life, gravity, drag, rotSpeed) {
+                        this.x = x;
+                        this.y = y;
+                        this.vx = vx;
+                        this.vy = vy;
+                        this.size = size;
+                        this.shape = shape;
+                        this.color = color;
+                        this.life = life;
+                        this.maxLife = life;
+                        this.gravity = gravity;
+                        this.drag = drag;
+                        this.rotation = randomRange(0, Math.PI * 2);
+                        this.rotationSpeed = rotSpeed;
+                        this.alpha = 1.0;
+                    }
+
+                    update(dt) {
+                        if (dt > 0.035) dt = 0.035;
+                        this.x += this.vx * dt;
+                        this.y += this.vy * dt;
+                        this.vy += this.gravity * dt;
+                        this.vx *= this.drag;
+                        this.vy *= this.drag;
+
+                        this.life -= dt;
+                        const lifeRatio = Math.max(0, this.life / this.maxLife);
+                        this.alpha = Math.min(1, lifeRatio * 1.2);
+                        if (this.alpha < 0) this.alpha = 0;
+
+                        if (CONFIG.ROTATION_SPIN) {
+                            this.rotation += this.rotationSpeed * dt;
+                            if (this.rotation > Math.PI * 2) this.rotation -= Math.PI * 2;
+                        }
+                        return this.life > 0;
+                    }
+
+                    draw(ctx) {
+                        if (this.alpha <= 0.01) return;
+                        drawShapeByType(
+                            this.shape, ctx,
+                            this.x, this.y,
+                            this.size,
+                            this.rotation,
+                            this.color,
+                            this.alpha
+                        );
+                    }
+                }
+
+                // ---------- Particle burst generator (performance: limit count) ----------
+                function createShapeExplosion(clickX, clickY) {
+                    let baseCount = CONFIG.PARTICLES_PER_CLICK;
+                    let countVariation = randomRange(0.75, 1.25);
+                    let totalParticles = Math.floor(baseCount * countVariation);
+                    totalParticles = Math.min(totalParticles, 100);
+
+                    // skip if pool is too large (prevent jank)
+                    if (particles.length > CONFIG.MAX_PARTICLES) return;
+
+                    const gravity = CONFIG.GRAVITY;
+                    const drag = CONFIG.DRAG;
+
+                    for (let i = 0; i < totalParticles; i++) {
+                        let angle = randomRange(0, Math.PI * 2);
+                        let speed = randomRange(CONFIG.SPEED_RANGE[0], CONFIG.SPEED_RANGE[1]);
+                        let vx = Math.cos(angle) * speed;
+                        let vy = Math.sin(angle) * speed;
+
+                        if (Math.random() > 0.7) {
+                            vx += randomRange(-30, 30);
+                            vy += randomRange(-30, 30);
+                        }
+
+                        let size = randomRange(CONFIG.SIZE_RANGE[0], CONFIG.SIZE_RANGE[1]);
+                        let shape = getRandomShape();
+                        if (shape === "star") size *= 1.05;
+                        if (shape === "triangle") size *= 0.95;
+
+                        let color = getRandomColor();
+                        let life = randomRange(CONFIG.LIFE_RANGE[0], CONFIG.LIFE_RANGE[1]);
+                        let rotSpeed = randomRange(-2.5, 2.5);
+
+                        let offsetX = randomRange(-5, 5);
+                        let offsetY = randomRange(-5, 5);
+                        let px = clickX + offsetX;
+                        let py = clickY + offsetY;
+
+                        const particle = new ShapeParticle(
+                            px, py, vx, vy, size, shape, color,
+                            life, gravity, drag, rotSpeed
+                        );
+                        particles.push(particle);
+                    }
+
+                    // tiny dust particles (reduced count)
+                    let dustCount = Math.min(Math.floor(totalParticles * 0.15), 15);
+                    for (let i = 0; i < dustCount; i++) {
+                        let angle = randomRange(0, Math.PI * 2);
+                        let speed = randomRange(30, 120);
+                        let vx = Math.cos(angle) * speed;
+                        let vy = Math.sin(angle) * speed;
+                        let size = randomRange(1.8, 4.5);
+                        let life = randomRange(0.4, 0.9);
+                        let color = `hsl(${Math.random() * 360}, 75%, 68%)`;
+                        let rotSpeed = randomRange(-0.8, 0.8);
+                        let dustParticle = new ShapeParticle(
+                            clickX + randomRange(-4, 4),
+                            clickY + randomRange(-4, 4),
+                            vx, vy, size, "circle", color,
+                            life, gravity, drag, rotSpeed
+                        );
+                        particles.push(dustParticle);
+                    }
+                }
+
+                // ---------- Click feedback (lightweight) ----------
+                function addClickFlash(x, y) {
+                    if (!ctx) return;
+                    ctx.save();
+                    ctx.globalCompositeOperation = "lighter";
+                    ctx.shadowBlur = 0;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 18, 0, Math.PI * 2);
+                    ctx.fillStyle = "rgba(255, 210, 90, 0.5)";
+                    ctx.fill();
+                    ctx.beginPath();
+                    ctx.arc(x, y, 8, 0, Math.PI * 2);
+                    ctx.fillStyle = "rgba(255, 160, 50, 0.7)";
+                    ctx.fill();
+                    ctx.restore();
+                }
+
+                // ---------- Event binding ----------
+                function onParticleClick(e) {
+                    let clientX, clientY;
+                    if (e.touches) {
+                        clientX = e.touches[0].clientX;
+                        clientY = e.touches[0].clientY;
+                        e.preventDefault();
+                    } else {
+                        clientX = e.clientX;
+                        clientY = e.clientY;
+                    }
+                    const x = Math.min(width - 8, Math.max(8, clientX));
+                    const y = Math.min(height - 8, Math.max(8, clientY));
+
+                    createShapeExplosion(x, y);
+                    addClickFlash(x, y);
+                }
+
+                // ---------- Animation loop (optimized) ----------
+                function updateAndDraw(nowMs) {
+                    const nowSec = nowMs / 1000;
+                    let dt = Math.min(0.032, nowSec - previousTime);
+                    if (dt <= 0) {
+                        previousTime = nowSec;
+                        requestAnimationFrame(updateAndDraw);
+                        return;
+                    }
+                    previousTime = nowSec;
+
+                    // update particles (reverse iteration for safe splice)
+                    for (let i = particles.length - 1; i >= 0; i--) {
+                        const p = particles[i];
+                        if (!p.update(dt)) {
+                            particles.splice(i, 1);
+                        }
+                    }
+
+                    // draw
+                    ctx.clearRect(0, 0, width, height);
+                    ctx.globalCompositeOperation = "lighter";
+                    for (let p of particles) {
+                        p.draw(ctx);
+                    }
+                    ctx.globalCompositeOperation = "source-over";
+
+                    animationId = requestAnimationFrame(updateAndDraw);
+                }
+
+                // ---------- resize ----------
+                function resizeCanvas() {
+                    width = window.innerWidth;
+                    height = window.innerHeight;
+                    canvas.width = width;
+                    canvas.height = height;
+                    if (ctx) {
+                        ctx.shadowBlur = 0;
+                        ctx.globalCompositeOperation = "source-over";
+                    }
+                }
+
+                // ---------- Init ----------
+                function init() {
+                    resizeCanvas();
+                    ctx = canvas.getContext("2d");
+                    if (!ctx) return;
+                    ctx.imageSmoothingEnabled = true;
+
+                    canvas.addEventListener("click", onParticleClick);
+                    canvas.addEventListener("touchstart", onParticleClick, { passive: false });
+                    window.addEventListener("resize", () => {
+                        resizeCanvas();
+                        // redraw one frame to keep particles
+                        if (ctx) {
+                            ctx.clearRect(0, 0, width, height);
+                            ctx.globalCompositeOperation = "lighter";
+                            for (let p of particles) p.draw(ctx);
+                            ctx.globalCompositeOperation = "source-over";
+                        }
+                    });
+
+                    previousTime = performance.now() / 1000;
+                    animationId = requestAnimationFrame(updateAndDraw);
+
+                    // opening burst (reduced count)
+                    setTimeout(() => {
+                        const cx = width / 2;
+                        const cy = height / 2;
+                        const oldMax = CONFIG.PARTICLES_PER_CLICK;
+                        CONFIG.PARTICLES_PER_CLICK = 35;
+                        createShapeExplosion(cx, cy);
+                        CONFIG.PARTICLES_PER_CLICK = oldMax;
+                    }, 160);
+                }
+
+                init();
+            })();
+        </script>
+    </body>
+
+</html>
